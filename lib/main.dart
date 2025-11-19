@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
+import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:nearby_connections/nearby_connections.dart';
@@ -102,7 +103,9 @@ class _EmergencyScreenState extends State<EmergencyScreen>
     PermissionStatus wifiStatus = await Permission.nearbyWifiDevices.request();
 
     if (wifiStatus.isPermanentlyDenied) {
-      _showSettingsSnackBar("Nearby Devices permission is blocked. Open Settings.");
+      _showSettingsSnackBar(
+        "Nearby Devices permission is blocked. Open Settings.",
+      );
       return false;
     }
 
@@ -140,7 +143,8 @@ class _EmergencyScreenState extends State<EmergencyScreen>
           _nearby.requestConnection(
             _userName,
             id,
-            onConnectionInitiated: (id, info) => _onConnectionInitiated(id, info),
+            onConnectionInitiated: (id, info) =>
+                _onConnectionInitiated(id, info),
             onConnectionResult: (id, status) {},
             onDisconnected: (id) {},
           );
@@ -183,7 +187,8 @@ class _EmergencyScreenState extends State<EmergencyScreen>
         _lastLong = "0.0";
       } else {
         Position position = await Geolocator.getCurrentPosition(
-            desiredAccuracy: LocationAccuracy.high);
+          desiredAccuracy: LocationAccuracy.high,
+        );
         _lastLat = position.latitude.toString();
         _lastLong = position.longitude.toString();
       }
@@ -206,7 +211,9 @@ class _EmergencyScreenState extends State<EmergencyScreen>
         onDisconnected: (id) {},
       );
 
-      final timestamp = DateFormat('yyyy-MM-dd HH:mm:ss').format(DateTime.now());
+      final timestamp = DateFormat(
+        'yyyy-MM-dd HH:mm:ss',
+      ).format(DateTime.now());
       final alertId = "ALERT-${Random().nextInt(9000) + 1000}";
 
       setState(() {
@@ -247,7 +254,10 @@ class _EmergencyScreenState extends State<EmergencyScreen>
         title: Text(title, style: const TextStyle(color: Colors.red)),
         content: Text(content),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("Cancel")),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text("Cancel"),
+          ),
           if (offerSettings)
             ElevatedButton(
               onPressed: () {
@@ -277,7 +287,10 @@ class _EmergencyScreenState extends State<EmergencyScreen>
 
   // --- 3. SHARED CONNECTION LOGIC ---
 
-  void _onConnectionInitiated(String endpointId, ConnectionInfo connectionInfo) {
+  void _onConnectionInitiated(
+    String endpointId,
+    ConnectionInfo connectionInfo,
+  ) {
     _nearby.acceptConnection(
       endpointId,
       onPayLoadRecieved: (endpointId, payload) {
@@ -291,10 +304,10 @@ class _EmergencyScreenState extends State<EmergencyScreen>
     );
   }
 
-  void _handleIncomingSOS(String message) {
+  void _handleIncomingSOS(String message) async {
     // Expected: SOS_ALERT|User|ID|Time|Lat|Long
     List<String> parts = message.split('|');
-
+    await AudioPlayer().play(AssetSource("ST_Siren.mp3"));
     if (parts.length >= 6) {
       String sender = parts[1];
       String alertId = parts[2];
@@ -309,37 +322,62 @@ class _EmergencyScreenState extends State<EmergencyScreen>
             children: [
               Icon(Icons.warning_amber_rounded, color: Colors.red, size: 30),
               SizedBox(width: 10),
-              Text("SOS RECEIVED", style: TextStyle(color: Colors.red, fontWeight: FontWeight.bold)),
+              Text(
+                "SOS RECEIVED",
+                style: TextStyle(
+                  color: Colors.red,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
             ],
           ),
           content: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text("From: $sender", style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+              Text(
+                "From: $sender",
+                style: const TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
               const SizedBox(height: 5),
               Text("Alert ID: $alertId"),
               Text("Time: $time"),
               const Divider(),
-              const Text("Location Coordinates:", style: TextStyle(color: Colors.grey, fontSize: 12)),
-              Text("$lat, $lng", style: const TextStyle(fontFamily: 'monospace', fontWeight: FontWeight.bold)),
+              const Text(
+                "Location Coordinates:",
+                style: TextStyle(color: Colors.grey, fontSize: 12),
+              ),
+              Text(
+                "$lat, $lng",
+                style: const TextStyle(
+                  fontFamily: 'monospace',
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
             ],
           ),
           actions: [
             TextButton(
-              onPressed: () => Navigator.pop(ctx),
+              onPressed: () async {
+                Navigator.pop(ctx);
+                await AudioPlayer().stop();
+              },
               child: const Text("CLOSE"),
             ),
             ElevatedButton.icon(
               style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.red,
-                  foregroundColor: Colors.white
+                backgroundColor: Colors.red,
+                foregroundColor: Colors.white,
               ),
               icon: const Icon(Icons.map),
               label: const Text("OPEN MAPS"),
               onPressed: () {
                 // Open Google Maps with marker
-                final url = "https://www.google.com/maps/search/?api=1&query=$lat,$lng";
+                final url =
+                    "https://www.google.com/maps/search/?api=1&query=$lat,$lng";
                 launchUrlString(url, mode: LaunchMode.externalApplication);
               },
             ),
@@ -380,7 +418,10 @@ class _EmergencyScreenState extends State<EmergencyScreen>
               padding: const EdgeInsets.all(8.0),
               child: Text(
                 _statusLog,
-                style: const TextStyle(color: Colors.grey, fontStyle: FontStyle.italic),
+                style: const TextStyle(
+                  color: Colors.grey,
+                  fontStyle: FontStyle.italic,
+                ),
               ),
             ),
             const SizedBox(height: 20),
@@ -432,7 +473,10 @@ class _EmergencyScreenState extends State<EmergencyScreen>
                     children: [
                       const Text(
                         "My Status",
-                        style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+                        style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          fontSize: 16,
+                        ),
                       ),
                       const Divider(),
                       Text("Sent: $_lastAlertTimestamp"),
