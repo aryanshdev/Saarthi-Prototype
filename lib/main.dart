@@ -3,13 +3,14 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
-import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:nearby_connections/nearby_connections.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:url_launcher/url_launcher_string.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:audioplayers/audioplayers.dart';
+import 'package:http/http.dart' as http;
 
 void main() {
   runApp(const MyApp());
@@ -45,10 +46,13 @@ class _EmergencyScreenState extends State<EmergencyScreen>
   final _nearby = Nearby();
   final _userName = 'EmergencyBeacon-${Random().nextInt(1000)}';
 
+  final AudioPlayer _audioPlayer = AudioPlayer();
+
+  // Controller for Server IP Input
+  final TextEditingController _serverIpController = TextEditingController();
+
   String? _lastAlertTimestamp;
   String? _lastAlertId;
-
-  // Store GPS coordinates
   String? _lastLat;
   String? _lastLong;
 
@@ -60,12 +64,13 @@ class _EmergencyScreenState extends State<EmergencyScreen>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    // Pre-fill with the IP you mentioned, but allow editing
+    _serverIpController.text = "10.43.24.89";
     _initApp();
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    // Re-check permissions if user returns from Settings
     if (state == AppLifecycleState.resumed) {
       _checkPermissionsAndRestart();
     }
@@ -78,7 +83,7 @@ class _EmergencyScreenState extends State<EmergencyScreen>
   Future<void> _checkPermissionsAndRestart() async {
     bool ready = await _requestPermissions();
     if (ready && !_isScanning && !_isBroadcasting) {
-      setState(() => _statusLog = "Permissions OK. Monitoring...");
+      setState(() => _statusLog = "Ready. Set Server IP & Monitor.");
       _startMonitoring();
     } else if (!ready) {
       setState(() => _statusLog = "Missing Permissions.");
@@ -86,12 +91,8 @@ class _EmergencyScreenState extends State<EmergencyScreen>
   }
 
   Future<bool> _requestPermissions() async {
-    // 1. Location (Required for Discovery & GPS)
-    if (!await Permission.location.isGranted) {
-      await Permission.location.request();
-    }
+    if (!await Permission.location.isGranted) await Permission.location.request();
 
-    // 2. Bluetooth Permissions
     Map<Permission, PermissionStatus> statuses = await [
       Permission.bluetooth,
       Permission.bluetoothAdvertise,
@@ -99,15 +100,8 @@ class _EmergencyScreenState extends State<EmergencyScreen>
       Permission.bluetoothScan,
     ].request();
 
-    // 3. Nearby Wifi (Android 13+)
     PermissionStatus wifiStatus = await Permission.nearbyWifiDevices.request();
-
-    if (wifiStatus.isPermanentlyDenied) {
-      _showSettingsSnackBar(
-        "Nearby Devices permission is blocked. Open Settings.",
-      );
-      return false;
-    }
+    if (wifiStatus.isPermanentlyDenied) return false;
 
     if (await Permission.bluetoothScan.isDenied ||
         await Permission.bluetoothAdvertise.isDenied ||
@@ -115,87 +109,67 @@ class _EmergencyScreenState extends State<EmergencyScreen>
         (Platform.isAndroid && await Permission.nearbyWifiDevices.isDenied)) {
       return false;
     }
-
     return true;
   }
 
-  void _showSettingsSnackBar(String msg) {
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(msg),
-        action: SnackBarAction(label: 'SETTINGS', onPressed: openAppSettings),
-        duration: const Duration(seconds: 5),
-      ),
-    );
-  }
+  // --- SERVER UPLOAD LOGIC ---
+  // MODIFIED: Accepts 'sender' to support relaying messages for others
+  Future<void> _uploadToServer(String sender, String alertId, String time, String lat, String long) async {
+    String ip = _serverIpController.text.trim();
+    if (ip.isEmpty) return;
 
-  // --- 1. MONITORING LOGIC (Receiver) ---
-
-  Future<void> _startMonitoring() async {
-    if (_isBroadcasting || _isScanning) return;
+    // Format URL correctly
+    String url = "http://10.43.24.89:3000/api/sos";
 
     try {
-      bool result = await _nearby.startDiscovery(
-        _userName,
-        _strategy,
-        onEndpointFound: (String id, String name, String serviceId) {
-          _nearby.requestConnection(
-            _userName,
-            id,
-            onConnectionInitiated: (id, info) =>
-                _onConnectionInitiated(id, info),
-            onConnectionResult: (id, status) {},
-            onDisconnected: (id) {},
-          );
-        },
-        onEndpointLost: (id) {},
+      _showSnackbar("Relaying data to Command Center...");
+
+      final response = await http.post(
+        Uri.parse(url),
+        headers: {"Content-Type": "application/json"},
+        body: jsonEncode({
+          "sender": sender,      // The original sender's name
+          "alert_id": alertId,   // The original alert ID
+          "timestamp": time,     // The original timestamp
+          "latitude": lat,       // The original coordinates
+          "longitude": long
+        }),
       );
 
-      setState(() {
-        _isScanning = result;
-        _statusLog = result ? "Scanning for SOS signals..." : "Scan failed.";
-      });
+      if (response.statusCode == 200) {
+        _showSnackbar("✔ Data relayed to Server.");
+      } else {
+        print("Server Error: ${response.statusCode} ${response.body}");
+      }
     } catch (e) {
-      _handleNearbyError(e);
+      print("Upload failed: $e");
     }
   }
 
-  // --- 2. BROADCASTING LOGIC (Sender) ---
-
+  // --- BROADCASTING LOGIC (Sender) ---
   Future<void> _sendEmergencyPing() async {
     if (_isScanning) {
       await _nearby.stopDiscovery();
-      setState(() {
-        _isScanning = false;
-      });
+      setState(() => _isScanning = false);
     }
-
     if (_isBroadcasting) {
       _showSnackbar("Already broadcasting SOS!");
       return;
     }
 
-    setState(() => _statusLog = "Acquiring GPS Location...");
+    setState(() => _statusLog = "Acquiring GPS...");
 
-    // Get Location BEFORE broadcasting
     try {
       bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
       if (!serviceEnabled) {
-        _showSnackbar("Location Services Disabled. Sending empty location.");
-        _lastLat = "0.0";
-        _lastLong = "0.0";
+        _lastLat = "0.0"; _lastLong = "0.0";
       } else {
-        Position position = await Geolocator.getCurrentPosition(
-          desiredAccuracy: LocationAccuracy.high,
-        );
+        Position position = await Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.high);
         _lastLat = position.latitude.toString();
         _lastLong = position.longitude.toString();
       }
     } catch (e) {
-      _lastLat = "0.0";
-      _lastLong = "0.0";
-      _showSnackbar("GPS Error: $e");
+      _lastLat = "0.0"; _lastLong = "0.0";
     }
 
     try {
@@ -204,110 +178,87 @@ class _EmergencyScreenState extends State<EmergencyScreen>
         _strategy,
         onConnectionInitiated: (id, info) => _onConnectionInitiated(id, info),
         onConnectionResult: (id, status) {
-          if (status == Status.CONNECTED) {
-            _sendSOSPayload(id);
-          }
+          if (status == Status.CONNECTED) _sendSOSPayload(id);
         },
         onDisconnected: (id) {},
       );
 
-      final timestamp = DateFormat(
-        'yyyy-MM-dd HH:mm:ss',
-      ).format(DateTime.now());
+      final timestamp = DateFormat('yyyy-MM-dd HH:mm:ss').format(DateTime.now());
       final alertId = "ALERT-${Random().nextInt(9000) + 1000}";
+
+
+      // Upload MY OWN alert to server
+      _uploadToServer(_userName, alertId, timestamp, _lastLat!, _lastLong!);
 
       setState(() {
         _isBroadcasting = result;
-        _lastAlertTimestamp = "Time: $timestamp";
-        _lastAlertId = "ID: $alertId";
-        _statusLog = "Broadcasting SOS Signal...";
+        _lastAlertTimestamp = timestamp;
+        _lastAlertId = alertId;
+        _statusLog = "Broadcasting Signal...";
       });
-
-      _showSnackbar("SOS Broadcast Active!");
     } catch (e) {
       _handleNearbyError(e);
-      setState(() {
-        _isBroadcasting = false;
-      });
+      setState(() => _isBroadcasting = false);
     }
-  }
-
-  void _handleNearbyError(Object e) {
-    String errorStr = e.toString();
-    if (errorStr.contains("8029") ||
-        errorStr.contains("MISSING_PERMISSION_NEARBY_WIFI_DEVICES")) {
-      setState(() => _statusLog = "Error: Missing Nearby WiFi Permission");
-      _showDialogError(
-        "Permission Error",
-        "Android 13+ requires 'Nearby Wi-Fi Devices' permission.",
-        true,
-      );
-    } else {
-      setState(() => _statusLog = "Error: $e");
-    }
-  }
-
-  void _showDialogError(String title, String content, bool offerSettings) {
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text(title, style: const TextStyle(color: Colors.red)),
-        content: Text(content),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text("Cancel"),
-          ),
-          if (offerSettings)
-            ElevatedButton(
-              onPressed: () {
-                Navigator.pop(ctx);
-                openAppSettings();
-              },
-              child: const Text("Open Settings"),
-            ),
-        ],
-      ),
-    );
   }
 
   void _sendSOSPayload(String endpointId) {
-    // Format: SOS_ALERT | User | ID | Time | Lat | Long
     String lat = _lastLat ?? "0.0";
     String long = _lastLong ?? "0.0";
-
-    String sosMessage =
-        "SOS_ALERT|$_userName|$_lastAlertId|$_lastAlertTimestamp|$lat|$long";
-
-    _nearby.sendBytesPayload(
-      endpointId,
-      Uint8List.fromList(utf8.encode(sosMessage)),
-    );
+    String sosMessage = "SOS_ALERT|$_userName|$_lastAlertId|$_lastAlertTimestamp|$lat|$long";
+    _nearby.sendBytesPayload(endpointId, Uint8List.fromList(utf8.encode(sosMessage)));
   }
 
-  // --- 3. SHARED CONNECTION LOGIC ---
+  // --- MONITORING LOGIC (Receiver) ---
+  Future<void> _startMonitoring() async {
+    if (_isBroadcasting || _isScanning) return;
+    try {
+      bool result = await _nearby.startDiscovery(
+        _userName,
+        _strategy,
+        onEndpointFound: (id, name, serviceId) {
+          _nearby.requestConnection(
+            _userName,
+            id,
+            onConnectionInitiated: (id, info) => _onConnectionInitiated(id, info),
+            onConnectionResult: (id, status) {},
+            onDisconnected: (id) {},
+          );
+        },
+        onEndpointLost: (id) {},
+      );
+      setState(() {
+        _isScanning = result;
+        _statusLog = result ? "Scanning..." : "Scan failed.";
+      });
+    } catch (e) {
+      _handleNearbyError(e);
+    }
+  }
 
-  void _onConnectionInitiated(
-    String endpointId,
-    ConnectionInfo connectionInfo,
-  ) {
+  void _onConnectionInitiated(String endpointId, ConnectionInfo connectionInfo) {
     _nearby.acceptConnection(
       endpointId,
       onPayLoadRecieved: (endpointId, payload) {
         if (payload.type == PayloadType.BYTES) {
           String msg = String.fromCharCodes(payload.bytes!);
-          if (msg.startsWith("SOS_ALERT")) {
-            _handleIncomingSOS(msg);
-          }
+          if (msg.startsWith("SOS_ALERT")) _handleIncomingSOS(msg);
         }
       },
     );
   }
 
   void _handleIncomingSOS(String message) async {
-    // Expected: SOS_ALERT|User|ID|Time|Lat|Long
+    // 1. Audio/Haptics
+    try {
+      await _audioPlayer.setReleaseMode(ReleaseMode.loop);
+      await _audioPlayer.play(AssetSource('ST_Siren.mp3'));
+    } catch (e) { debugPrint("$e"); }
+
+
+    // 2. Parse Message
     List<String> parts = message.split('|');
-    await AudioPlayer().play(AssetSource("ST_Siren.mp3"));
+
     if (parts.length >= 6) {
       String sender = parts[1];
       String alertId = parts[2];
@@ -315,83 +266,67 @@ class _EmergencyScreenState extends State<EmergencyScreen>
       String lat = parts[4];
       String lng = parts[5];
 
-      showDialog(
-        context: context,
-        builder: (ctx) => AlertDialog(
-          title: const Row(
-            children: [
-              Icon(Icons.warning_amber_rounded, color: Colors.red, size: 30),
-              SizedBox(width: 10),
-              Text(
-                "SOS RECEIVED",
-                style: TextStyle(
-                  color: Colors.red,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-            ],
-          ),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                "From: $sender",
-                style: const TextStyle(
-                  fontSize: 16,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-              const SizedBox(height: 5),
-              Text("Alert ID: $alertId"),
-              Text("Time: $time"),
-              const Divider(),
-              const Text(
-                "Location Coordinates:",
-                style: TextStyle(color: Colors.grey, fontSize: 12),
-              ),
-              Text(
-                "$lat, $lng",
-                style: const TextStyle(
-                  fontFamily: 'monospace',
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-            ],
-          ),
-          actions: [
-            TextButton(
-              onPressed: () async {
-                Navigator.pop(ctx);
-                await AudioPlayer().stop();
-              },
-              child: const Text("CLOSE"),
-            ),
-            ElevatedButton.icon(
-              style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.red,
-                foregroundColor: Colors.white,
-              ),
-              icon: const Icon(Icons.map),
-              label: const Text("OPEN MAPS"),
-              onPressed: () {
-                // Open Google Maps with marker
-                final url =
-                    "https://www.google.com/maps/search/?api=1&query=$lat,$lng";
-                launchUrlString(url, mode: LaunchMode.externalApplication);
-              },
-            ),
+      // 3. RELAY TO SERVER (Mesh Gateway Feature)
+      // This sends the data received via Bluetooth to the Internet DB
+      _uploadToServer(sender, alertId, time, lat, lng);
+
+      // 4. Show UI
+      _showSOSDialog(sender, alertId, time, lat, lng);
+    }
+  }
+
+  void _showSOSDialog(String sender, String id, String time, String lat, String lng) {
+    if (!mounted) return;
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: Colors.red.shade50,
+        title: const Text("SOS ALERT", style: TextStyle(color: Colors.red, fontWeight: FontWeight.bold)),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text("From: $sender"),
+            Text("Time: $time"),
+            Text("Loc: $lat, $lng"),
+            const SizedBox(height: 10),
+            const Text("(Data relayed to HQ)", style: TextStyle(fontSize: 10, color: Colors.grey),textAlign: TextAlign.start,),
           ],
         ),
-      );
+        actions: [
+          TextButton(
+            onPressed: () { _stopAlert(); Navigator.pop(ctx); },
+            child: const Text("STOP ALARM"),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              _stopAlert();
+              launchUrlString("https://www.google.com/maps/search/?api=1&query=$lat,$lng", mode: LaunchMode.externalApplication);
+              Navigator.pop(ctx);
+            },
+            child: const Text("MAPS"),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _stopAlert() {
+    _audioPlayer.stop();
+  }
+
+  void _handleNearbyError(Object e) {
+    if (e.toString().contains("8029")) {
+      _showSnackbar("Error: Missing Nearby WiFi Permission (Android 13+)");
+      openAppSettings();
+    } else {
+      setState(() => _statusLog = "Error: $e");
     }
   }
 
   void _showSnackbar(String message) {
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(message), duration: const Duration(seconds: 3)),
-    );
+    // ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message), duration: const Duration(seconds: 2)));
   }
 
   @override
@@ -399,6 +334,8 @@ class _EmergencyScreenState extends State<EmergencyScreen>
     WidgetsBinding.instance.removeObserver(this);
     _nearby.stopAdvertising();
     _nearby.stopDiscovery();
+    _audioPlayer.dispose();
+    _serverIpController.dispose();
     super.dispose();
   }
 
@@ -410,86 +347,48 @@ class _EmergencyScreenState extends State<EmergencyScreen>
         backgroundColor: _isBroadcasting ? Colors.red : Colors.blueAccent,
         foregroundColor: Colors.white,
       ),
-      body: Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Padding(
-              padding: const EdgeInsets.all(8.0),
-              child: Text(
-                _statusLog,
-                style: const TextStyle(
-                  color: Colors.grey,
-                  fontStyle: FontStyle.italic,
+      body: SingleChildScrollView(
+        child: Center(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Padding(
+                padding: const EdgeInsets.all(16.0),
+                child: TextField(
+                  controller: _serverIpController,
+                  decoration: const InputDecoration(
+                    labelText: "Server IP (e.g., 10.43.24.89)",
+                    border: OutlineInputBorder(),
+                    prefixIcon: Icon(Icons.computer),
+                  ),
+                  keyboardType: TextInputType.text, // Changed to text to allow dots
                 ),
               ),
-            ),
-            const SizedBox(height: 20),
-
-            SizedBox(
-              width: 220,
-              height: 220,
-              child: ElevatedButton(
-                onPressed: _sendEmergencyPing,
-                style: ElevatedButton.styleFrom(
-                  shape: const CircleBorder(),
-                  padding: const EdgeInsets.all(20),
-                  backgroundColor: _isBroadcasting
-                      ? Colors.grey.shade800
-                      : Colors.red,
-                  foregroundColor: Colors.white,
-                  elevation: 15,
-                  shadowColor: Colors.redAccent,
-                ),
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Icon(
-                      _isBroadcasting ? Icons.wifi_tethering : Icons.sos,
-                      size: 80,
-                    ),
-                    const SizedBox(height: 15),
-                    Text(
-                      _isBroadcasting ? 'BROADCASTING' : 'SEND SOS',
-                      style: const TextStyle(
-                        fontSize: 22,
-                        fontWeight: FontWeight.bold,
-                      ),
-                      textAlign: TextAlign.center,
-                    ),
-                  ],
-                ),
-              ),
-            ),
-            const SizedBox(height: 40),
-
-            if (_lastAlertTimestamp != null)
-              Card(
-                margin: const EdgeInsets.symmetric(horizontal: 30),
-                elevation: 4,
-                child: Padding(
-                  padding: const EdgeInsets.all(16.0),
+              Text(_statusLog, style: const TextStyle(color: Colors.grey)),
+              const SizedBox(height: 20),
+              SizedBox(
+                width: 220, height: 220,
+                child: ElevatedButton(
+                  onPressed: _sendEmergencyPing,
+                  style: ElevatedButton.styleFrom(
+                    shape: const CircleBorder(),
+                    backgroundColor: _isBroadcasting ? Colors.grey.shade800 : Colors.red,
+                    foregroundColor: Colors.white,
+                  ),
                   child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
                     children: [
-                      const Text(
-                        "My Status",
-                        style: TextStyle(
-                          fontWeight: FontWeight.bold,
-                          fontSize: 16,
-                        ),
-                      ),
-                      const Divider(),
-                      Text("Sent: $_lastAlertTimestamp"),
-                      const SizedBox(height: 4),
-                      Text(
-                        "Loc: ${(_lastLat != null) ? '$_lastLat, $_lastLong' : 'Acquiring...'}",
-                        style: const TextStyle(color: Colors.blueGrey),
-                      ),
+                      Icon(_isBroadcasting ? Icons.wifi_tethering : Icons.sos, size: 80),
+                      Text(_isBroadcasting ? 'BROADCASTING' : 'SEND SOS', style: const TextStyle(fontWeight: FontWeight.bold)),
                     ],
                   ),
                 ),
               ),
-          ],
+              const SizedBox(height: 20),
+              if (_lastAlertTimestamp != null)
+                Text("Sent: $_lastAlertTimestamp \nLoc: $_lastLat, $_lastLong", textAlign: TextAlign.center),
+            ],
+          ),
         ),
       ),
     );
