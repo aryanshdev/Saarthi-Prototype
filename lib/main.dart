@@ -11,6 +11,8 @@ import 'package:url_launcher/url_launcher_string.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:audioplayers/audioplayers.dart';
 import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
+import 'contact_details_screen.dart';
 
 void main() {
   runApp(const MyApp());
@@ -24,10 +26,7 @@ class MyApp extends StatelessWidget {
     return MaterialApp(
       title: 'Emergency Ping Prototype',
       debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.red),
-        useMaterial3: true,
-      ),
+      theme: ThemeData(colorScheme: ColorScheme.fromSeed(seedColor: Colors.red), useMaterial3: true),
       home: const EmergencyScreen(),
     );
   }
@@ -40,11 +39,10 @@ class EmergencyScreen extends StatefulWidget {
   State<EmergencyScreen> createState() => _EmergencyScreenState();
 }
 
-class _EmergencyScreenState extends State<EmergencyScreen>
-    with WidgetsBindingObserver {
+class _EmergencyScreenState extends State<EmergencyScreen> with WidgetsBindingObserver {
   final Strategy _strategy = Strategy.P2P_STAR;
   final _nearby = Nearby();
-  final _userName = 'EmergencyBeacon-${Random().nextInt(1000)}';
+  String _userName = 'User-${Random().nextInt(1000)}';
 
   final AudioPlayer _audioPlayer = AudioPlayer();
 
@@ -77,7 +75,18 @@ class _EmergencyScreenState extends State<EmergencyScreen>
   }
 
   Future<void> _initApp() async {
+    await _loadUserName();
     await _checkPermissionsAndRestart();
+  }
+
+  Future<void> _loadUserName() async {
+    final prefs = await SharedPreferences.getInstance();
+    final savedName = prefs.getString('name');
+    if (savedName != null && savedName.isNotEmpty) {
+      setState(() {
+        _userName = savedName;
+      });
+    }
   }
 
   Future<void> _checkPermissionsAndRestart() async {
@@ -128,11 +137,11 @@ class _EmergencyScreenState extends State<EmergencyScreen>
         Uri.parse(url),
         headers: {"Content-Type": "application/json"},
         body: jsonEncode({
-          "sender": sender,      // The original sender's name
-          "alert_id": alertId,   // The original alert ID
-          "timestamp": time,     // The original timestamp
-          "latitude": lat,       // The original coordinates
-          "longitude": long
+          "sender": sender, // The original sender's name
+          "alert_id": alertId, // The original alert ID
+          "timestamp": time, // The original timestamp
+          "latitude": lat, // The original coordinates
+          "longitude": long,
         }),
       );
 
@@ -162,14 +171,16 @@ class _EmergencyScreenState extends State<EmergencyScreen>
     try {
       bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
       if (!serviceEnabled) {
-        _lastLat = "0.0"; _lastLong = "0.0";
+        _lastLat = "0.0";
+        _lastLong = "0.0";
       } else {
         Position position = await Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.high);
         _lastLat = position.latitude.toString();
         _lastLong = position.longitude.toString();
       }
     } catch (e) {
-      _lastLat = "0.0"; _lastLong = "0.0";
+      _lastLat = "0.0";
+      _lastLong = "0.0";
     }
 
     try {
@@ -185,7 +196,6 @@ class _EmergencyScreenState extends State<EmergencyScreen>
 
       final timestamp = DateFormat('yyyy-MM-dd HH:mm:ss').format(DateTime.now());
       final alertId = "ALERT-${Random().nextInt(9000) + 1000}";
-
 
       // Upload MY OWN alert to server
       _uploadToServer(_userName, alertId, timestamp, _lastLat!, _lastLong!);
@@ -253,8 +263,9 @@ class _EmergencyScreenState extends State<EmergencyScreen>
     try {
       await _audioPlayer.setReleaseMode(ReleaseMode.loop);
       await _audioPlayer.play(AssetSource('ST_Siren.mp3'));
-    } catch (e) { debugPrint("$e"); }
-
+    } catch (e) {
+      debugPrint("$e");
+    }
 
     // 2. Parse Message
     List<String> parts = message.split('|');
@@ -282,7 +293,10 @@ class _EmergencyScreenState extends State<EmergencyScreen>
       barrierDismissible: false,
       builder: (ctx) => AlertDialog(
         backgroundColor: Colors.red.shade50,
-        title: const Text("SOS ALERT", style: TextStyle(color: Colors.red, fontWeight: FontWeight.bold)),
+        title: const Text(
+          "SOS ALERT",
+          style: TextStyle(color: Colors.red, fontWeight: FontWeight.bold),
+        ),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -290,18 +304,28 @@ class _EmergencyScreenState extends State<EmergencyScreen>
             Text("Time: $time"),
             Text("Loc: $lat, $lng"),
             const SizedBox(height: 10),
-            const Text("(Data relayed to HQ)", style: TextStyle(fontSize: 10, color: Colors.grey),textAlign: TextAlign.start,),
+            const Text(
+              "(Data relayed to HQ)",
+              style: TextStyle(fontSize: 10, color: Colors.grey),
+              textAlign: TextAlign.start,
+            ),
           ],
         ),
         actions: [
           TextButton(
-            onPressed: () { _stopAlert(); Navigator.pop(ctx); },
+            onPressed: () {
+              _stopAlert();
+              Navigator.pop(ctx);
+            },
             child: const Text("STOP ALARM"),
           ),
           ElevatedButton(
             onPressed: () {
               _stopAlert();
-              launchUrlString("https://www.google.com/maps/search/?api=1&query=$lat,$lng", mode: LaunchMode.externalApplication);
+              launchUrlString(
+                "https://www.google.com/maps/search/?api=1&query=$lat,$lng",
+                mode: LaunchMode.externalApplication,
+              );
               Navigator.pop(ctx);
             },
             child: const Text("MAPS"),
@@ -346,6 +370,15 @@ class _EmergencyScreenState extends State<EmergencyScreen>
         title: const Text('Emergency Link'),
         backgroundColor: _isBroadcasting ? Colors.red : Colors.blueAccent,
         foregroundColor: Colors.white,
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.account_circle),
+            onPressed: () async {
+              await Navigator.push(context, MaterialPageRoute(builder: (context) => const ContactDetailsScreen()));
+              _loadUserName(); // Refresh name in case it was changed
+            },
+          ),
+        ],
       ),
       body: SingleChildScrollView(
         child: Center(
@@ -365,9 +398,23 @@ class _EmergencyScreenState extends State<EmergencyScreen>
                 ),
               ),
               Text(_statusLog, style: const TextStyle(color: Colors.grey)),
+              const SizedBox(height: 8),
+              Text(
+                "ID: $_userName",
+                style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.blueGrey),
+              ),
+              const SizedBox(height: 12),
+              ElevatedButton(
+                onPressed: () async {
+                  await Navigator.push(context, MaterialPageRoute(builder: (context) => const ContactDetailsScreen()));
+                  _loadUserName(); // Refresh name
+                },
+                child: const Text("My Details"),
+              ),
               const SizedBox(height: 20),
               SizedBox(
-                width: 220, height: 220,
+                width: 220,
+                height: 220,
                 child: ElevatedButton(
                   onPressed: _sendEmergencyPing,
                   style: ElevatedButton.styleFrom(
@@ -379,7 +426,10 @@ class _EmergencyScreenState extends State<EmergencyScreen>
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
                       Icon(_isBroadcasting ? Icons.wifi_tethering : Icons.sos, size: 80),
-                      Text(_isBroadcasting ? 'BROADCASTING' : 'SEND SOS', style: const TextStyle(fontWeight: FontWeight.bold)),
+                      Text(
+                        _isBroadcasting ? 'BROADCASTING' : 'SEND SOS',
+                        style: const TextStyle(fontWeight: FontWeight.bold),
+                      ),
                     ],
                   ),
                 ),
